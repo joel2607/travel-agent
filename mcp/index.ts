@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 
+import express from 'express';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  Tool,
-} from "@modelcontextprotocol/sdk/types.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { CallToolRequest, CallToolRequestSchema, ListToolsRequestSchema, Tool } from "@modelcontextprotocol/sdk/types.js";
 import fetch from "node-fetch";
+import "dotenv/config";
 
 // Response interfaces
 interface GoogleMapsResponse {
@@ -591,7 +589,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: MAPS_TOOLS,
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
   try {
     switch (request.params.name) {
       case "maps_geocode": {
@@ -667,9 +665,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function runServer() {
-  const transport = new StdioServerTransport();
+  console.log("Starting server");
+  const app = express();
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   await server.connect(transport);
-  console.error("Google Maps MCP Server running on stdio");
+
+  app.use(express.json());
+
+  app.post('/mcp', (req, res) => {
+    transport.handleRequest(req, res, req.body);
+  });
+
+  app.listen(8000, () => {
+    console.error("Google Maps MCP Server running on http://localhost:8000/mcp");
+  });
 }
 
 runServer().catch((error) => {

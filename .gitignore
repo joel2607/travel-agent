@@ -144,6 +144,11 @@ ENV/
 env.bak/
 venv.bak/
 
+# js
+node_modules/
+dist/
+package-lock.json
+
 # Spyder project settings
 .spyderproject
 .spyproject
