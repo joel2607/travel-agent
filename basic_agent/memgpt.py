@@ -1,138 +1,171 @@
 import os
-from typing import TypedDict, Annotated, List, Union, Optional
-from memgpt.autogen.memgpt_agent import create_memgpt_autogen_agent_from_config
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-import asyncio
-
+import json
+import uuid
+from typing import TypedDict, List, Annotated, Any
 from dotenv import load_dotenv
+
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+from langgraph.graph.message import add_messages
+
+from langchain_openai import ChatOpenAI
+import chromadb
 
 load_dotenv(override=True)
 
-# --- Configuration and Setup ---
-# NOTE: This code requires you to have the following libraries installed:
-# pip install -U langchain langgraph memgpt langchain-google-genai
-#
-# You must set your environment variable for the Google API Key.
-# export GOOGLE_API_KEY="your_api_key_here"
-#
-# MemGPT requires a configuration file. You can create one by running:
-# memgpt configure
 
-# Define the model to be used. The user requested "Gemini 2.5 flash lite".
-GEMINI_MODEL_NAME = "gemini-2.5-flash-lite"
-os.environ["MEMGPT_MODEL"] = GEMINI_MODEL_NAME
+WORKING_MEMORY_FILE = "working_memory.json"
+client = chromadb.PersistentClient(path="./chroma_db")
+archival_collection = client.get_or_create_collection(name="archival_memory")
 
-# --- Define the Agent State ---
-# This is the state that will be passed between nodes in the graph.
-# 'messages' will store the conversation history, and 'memgpt_agent_state'
-# will hold the state of our MemGPT agent.
-class AgentState(TypedDict):
-    """The state of the agent."""
-    messages: Annotated[List[Union[HumanMessage, AIMessage]], add_messages]
-    memgpt_agent_state: dict
+
+
+# --- State ---
+class GraphState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+    session_id: str
+
+
+
+
+# --- Helper Functions (Unchanged) ---
+def load_working_memory(session_id: str) -> List[str]:
+    if not os.path.exists(WORKING_MEMORY_FILE): return []
+    with open(WORKING_MEMORY_FILE, 'r') as f:
+        try: data = json.load(f)
+        except json.JSONDecodeError: return []
+    return data.get(session_id, [])
+
+def save_working_memory(session_id: str, facts: List[str]):
+    data = {}
+    if os.path.exists(WORKING_MEMORY_FILE):
+        try:
+            with open(WORKING_MEMORY_FILE, 'r') as f: data = json.load(f)
+        except json.JSONDecodeError: data = {}
+    data[session_id] = facts
+    with open(WORKING_MEMORY_FILE, 'w') as f: json.dump(data, f, indent=4)
+
+
+
+
+# --- Tools ---
+@tool
+def add_to_working_context(session_id: str, fact: str) -> str:
+    """Adds a fact to the persistent working context."""
+    print(f"--- TOOL: Adding to working context: '{fact}' ---")
+    facts = load_working_memory(session_id)
+    if fact not in facts: facts.append(fact)
+    save_working_memory(session_id, facts)
+    return f"Successfully added to working context: '{fact}'."
+@tool
+def search_archive(query: str) -> str:
+    """Performs a semantic search on the long-term vector database."""
+    print(f"--- TOOL: Searching archive for: '{query}' ---")
+    results = archival_collection.query(query_texts=[query], n_results=2)
+    retrieved_docs = results.get('documents', [[]])[0]
+    if not retrieved_docs: return "No relevant facts found in the archive."
+    return "Found relevant facts:\n- " + "\n- ".join(retrieved_docs)
+
+
+
+tools = [add_to_working_context, search_archive]
+llm_with_tools = ChatOpenAI(model="gpt-4o-mini", temperature=0).bind_tools(tools)
+tool_node = ToolNode(tools=tools)
+
+
+
 
 # --- Agent Node ---
-# This node will handle the core logic of our MemGPT agent.
-# It receives the current state and returns a new state with the agent's response.
-def memgpt_node(state: AgentState) -> dict:
+def agent_node(state: GraphState) -> dict[str, Any]:
     """
-    This node invokes the MemGPT agent to get a response.
+    This single node decides everything:
+    1. Answer directly from context if possible.
+    2. Call a tool if new info is provided or a search is needed.
+    3. Confirm that a tool has been used.
     """
-    print("\n--- Invoking MemGPT Agent ---")
-    
-    # Retrieve the last message from the conversation history.
-    user_input = state['messages'][-1].content
-    
-    # Pass the input to the MemGPT agent.
-    # We use a simple `run` method for demonstration. In a real app,
-    # you would handle more complex interaction logic.
-    try:
-        memgpt_agent = state['memgpt_agent_state']
-        response = memgpt_agent.step(user_input)
-        
-        # The response from MemGPT is a string. We convert it to an AIMessage.
-        new_messages = [AIMessage(content=response.text)]
-        
-        # The MemGPT agent's internal state needs to be updated.
-        # This is a simplification; a more robust solution would handle
-        # state serialization and deserialization.
-        state['memgpt_agent_state'] = memgpt_agent
-        
-        return {"messages": new_messages}
-    except Exception as e:
-        print(f"Error during MemGPT invocation: {e}")
-        return {"messages": [AIMessage(content="I am sorry, an error occurred while processing your request.")]}
+    print("--- AGENT: Processing... ---")
+    session_id = state['session_id']
+    facts = load_working_memory(session_id)
+    working_context_str = "\n".join([f"- {fact}" for fact in facts])
 
-# --- Graph Definition ---
-def create_agent_graph():
-    """
-    Creates and compiles the LangGraph state machine.
-    """
-    # Instantiate the LLM.
-    llm = ChatGoogleGenerativeAI(model=GEMINI_MODEL_NAME)
-    
-    # Set up the MemGPT agent configuration.
-    # This is a basic configuration. For more advanced features like persona,
-    # you would adjust the parameters here.
-    agent_config = {
-        "persona": "A helpful assistant that remembers our conversations.",
-        "human_name": "User",
+    system_prompt = f"""
+You are a helpful and concise AI assistant with a memory system.
+
+**Your Top Priority: Answer the user's question directly if you can.**
+Review the conversation history and the Working Context. If the answer is there, provide it immediately and concisely. **DO NOT use a tool if you already know the answer.**
+
+**If you cannot answer directly, you MUST use a tool:**
+- If the user is giving you new information (preferences, facts, names), use `add_to_working_context`.
+- If the user is asking a question you don't know the answer to, use `search_archive`.
+
+**After a tool is used**, provide a brief, simple confirmation. (e.g., "Okay, I've saved that.")
+
+CURRENT WORKING CONTEXT:
+{working_context_str}
+
+SESSION ID FOR TOOLS: "{session_id}"
+"""
+    messages = [SystemMessage(content=system_prompt)] + state["messages"]
+    response = llm_with_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+
+
+# --- Router ---
+def router(state: GraphState) -> str:
+    """A simple router. If the agent called a tool, run the tool. Otherwise, the turn is over."""
+    if state["messages"][-1].tool_calls:
+        return "tools"
+    return END
+
+
+
+# --- The Graph Definition ---
+graph_builder = StateGraph(GraphState)
+graph_builder.add_node("agent", agent_node)
+graph_builder.add_node("tools", tool_node)
+graph_builder.set_entry_point("agent")
+graph_builder.add_edge("tools", "agent")
+graph_builder.add_conditional_edges(
+    "agent",
+    router,
+    {
+        "tools": "tools",
+        "__end__": END 
     }
-    
-    # Create the MemGPT agent instance. This is a one-time setup.
-    memgpt_agent = create_memgpt_autogen_agent_from_config(agent_config)
+)
+graph = graph_builder.compile()
 
-    # Define the graph with our custom state.
-    workflow = StateGraph(AgentState)
 
-    # Add the MemGPT node to the graph.
-    workflow.add_node("memgpt_agent", memgpt_node)
 
-    # Set the entry point of the graph.
-    workflow.set_entry_point("memgpt_agent")
-    
-    # Set the end point, which is the same as the entry point in this
-    # simple conversational loop.
-    workflow.add_edge("memgpt_agent", END)
 
-    # Compile the graph.
-    graph = workflow.compile()
-    
-    return graph, memgpt_agent
+# --- The Chat Loop  ---
+session_id = f"session_{uuid.uuid4()}"
+current_state = {"messages": [], "session_id": session_id}
+print("Starting assistant. Type 'quit' or 'exit' to end.")
 
-# --- Main Execution Loop ---
-async def main():
-    print(f"Initializing agent with model: {GEMINI_MODEL_NAME}...")
-    
-    # Create the graph and the initial MemGPT agent instance.
-    graph, memgpt_agent = create_agent_graph()
+while True:
+    user_input = input("You: ")
+    if user_input.lower() in ["quit", "exit"]:
+        print("Assistant: Goodbye!")
+        break
 
-    print("Agent is ready. Type 'exit' to quit.")
+    current_state["messages"].append(HumanMessage(content=user_input))
 
-    # Main chat loop.
-    while True:
-        user_input = input("\nUser: ")
-        if user_input.lower() == "exit":
-            break
+    final_message_content = ""
+    for step in graph.stream(current_state):
+        node, output = list(step.items())[0]
+        # Always update the full state
+        current_state["messages"].extend(output.get("messages", []))
         
-        # Prepare the initial state for the graph.
-        # The agent state is passed into the graph.
-        initial_state = {
-            "messages": [HumanMessage(content=user_input)],
-            "memgpt_agent_state": memgpt_agent
-        }
+        # Capture the last content message before the graph ends
+        if node == "agent" and not output.get("messages", [{}])[-1].tool_calls:
+            last_msg = output.get("messages", [{}])[-1]
+            if last_msg and last_msg.content:
+                final_message_content = last_msg.content
 
-        # Run the graph and stream the output.
-        async for s in graph.astream(initial_state):
-            # Print the response from the last node in the graph.
-            # In our simple case, this will be the MemGPT agent's output.
-            if "__end__" in s:
-                last_message = s["__end__"]["messages"][-1]
-                print(f"Agent: {last_message.content}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    if final_message_content:
+        print(f"Assistant: {final_message_content}\n")
