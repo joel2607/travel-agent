@@ -5,8 +5,10 @@ from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import ToolMessage, BaseMessage
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from mcp import McpClient
+
+import functools
 
 # 1. Define the state for the graph
 class State(TypedDict):
@@ -39,14 +41,19 @@ def should_continue(state: State) -> str:
         return "tools"
     return END
 
-async def call_model(state: State, llm: ChatOpenAI) -> dict:
+async def call_model(state: State, llm: ChatGoogleGenerativeAI
+                     ) -> dict:
     response = await llm.ainvoke(state["messages"])
     return {"messages": [response]}
 
 # 4. Run the graph
 async def main():
     """Main function to run the LangGraph application."""
-    llm = ChatOpenAI(model="gpt-4o")
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash-lite",
+        temperature=0,
+        api_key="AIzaSyDMtrQ2dH82CL8CfWYWzaIhOP0qz5Ta0VE"
+    )
 
     async with McpClient(mcp_server_url="http://localhost:8000/mcp") as mcp_client:
         # List the available tools from the MCP server
@@ -54,9 +61,9 @@ async def main():
         print("Available tools:", tools)
 
         graph_builder = StateGraph(State)
-        graph_builder.add_node("llm", lambda state: call_model(state, llm))
-        graph_builder.add_conditional_edge("llm", should_continue)
-        graph_builder.add_node("tools", lambda state: tool_node(state, mcp_client))
+        graph_builder.add_node("llm", functools.partial(call_model, llm=llm))
+        graph_builder.add_conditional_edges("llm", should_continue)
+        graph_builder.add_node("tools", functools.partial(tool_node, mcp_client=mcp_client))
         graph_builder.add_edge("tools", "llm")
         graph_builder.set_entry_point("llm")
 

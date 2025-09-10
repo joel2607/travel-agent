@@ -34,7 +34,21 @@ class McpClient:
         }
         async with self._session.post(self.mcp_server_url, data=json.dumps(request_payload)) as response:
             response.raise_for_status()
-            return await response.json()
+            if response.content_type == 'text/event-stream':
+                async for line in response.content:
+                    if line.startswith(b'data:'):
+                        try:
+                            data = json.loads(line[5:])
+                            if 'result' in data and 'tools' in data['result']:
+                                return data['result']['tools']
+                        except json.JSONDecodeError:
+                            pass
+                return []
+            else:
+                json_response = await response.json()
+                if 'result' in json_response and 'tools' in json_response['result']:
+                    return json_response['result']['tools']
+                return []
 
     async def call_tool(self, tool_name: str, **kwargs) -> dict:
         """Calls a tool on the MCP server."""
@@ -50,7 +64,21 @@ class McpClient:
         }
         async with self._session.post(self.mcp_server_url, data=json.dumps(request_payload)) as response:
             response.raise_for_status()
-            return await response.json()
+            if response.content_type == 'text/event-stream':
+                async for line in response.content:
+                    if line.startswith(b'data:'):
+                        try:
+                            data = json.loads(line[5:])
+                            if 'result' in data:
+                                return data['result']
+                        except json.JSONDecodeError:
+                            pass
+                return {}
+            else:
+                json_response = await response.json()
+                if 'result' in json_response:
+                    return json_response['result']
+                return json_response
 
     async def __aenter__(self):
         await self.initialize()
