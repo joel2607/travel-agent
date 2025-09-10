@@ -3,6 +3,10 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
+import os
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 # ---------------------
 # MODELS
@@ -22,6 +26,10 @@ class SearchQuery(BaseModel):
     query: str = Field(..., description="The specific, optimized search string for Google Maps.")
     priority: int = Field(..., description="A priority score from 1-5, where 5 is most important, based on user interests.")
 
+class SearchQueries(BaseModel):
+    """A list of search queries."""
+    queries: List[SearchQuery]
+
 
 # ---------------------
 # Graph State
@@ -38,7 +46,7 @@ def travel_preferences_node(state: GraphState):
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash-lite",
         temperature=0,
-        api_key="AIzaSyDMtrQ2dH82CL8CfWYWzaIhOP0qz5Ta0VE"
+        api_key=os.getenv("GEMINI_API_KEY")
     )
     
     llm_structured = llm.with_structured_output(PreferencesModel)
@@ -76,10 +84,10 @@ def generate_search_queries_node(state: GraphState):
     print("--- GENERATING SEARCH QUERIES ---")
     
     # Use your preferred LLM setup
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.3, api_key=os.getenv("GEMINI_API_KEY"))
     
     # We want the LLM to output a list of SearchQuery objects
-    structured_llm = llm.with_structured_output(List[SearchQuery])
+    structured_llm = llm.with_structured_output(SearchQueries)
     
     preferences = state['user_preferences']
 
@@ -106,7 +114,8 @@ def generate_search_queries_node(state: GraphState):
 
     # Invoke the LLM to get the structured search plan
     try:
-        search_queries = structured_llm.invoke(query_generator_prompt)
+        search_queries_model = structured_llm.invoke(query_generator_prompt)
+        search_queries = search_queries_model.queries
         state['search_queries'] = search_queries
         
         # Add a message to the state to show progress

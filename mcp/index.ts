@@ -674,7 +674,7 @@ async function runServer() {
   // The transport.handleRequest method expects the raw request stream to parse it itself.
   app.post('/mcp', (req, res) => {
     // The transport will handle all the JSON parsing and request routing internally
-    transport.handleRequest(req, res, req.body);
+    transport.handleRequest(req, res);
   });
 
   app.listen(8000, () => {
