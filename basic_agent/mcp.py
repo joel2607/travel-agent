@@ -326,14 +326,14 @@ def main():
     graph = build_travel_planner()
 
     #Optional: Visualize the graph (requires mermaid-cli)
-    try:
-        graph.get_graph().draw_mermaid_png(output_file_path="travel_planner_graph.png")
-        print("✅ Graph visualization saved to travel_planner_graph.png")
-    except Exception as e:
-        print(f"⚠️ Could not generate graph image: {e}")
-        print("Please ensure you have either pygraphviz or mermaid-cli installed for graph visualization.")
+    # try:
+    #     graph.get_graph().draw_mermaid_png(output_file_path="travel_planner_graph.png")
+    #     print("✅ Graph visualization saved to travel_planner_graph.png")
+    # except Exception as e:
+    #     print(f"⚠️ Could not generate graph image: {e}")
+    #     print("Please ensure you have either pygraphviz or mermaid-cli installed for graph visualization.")
 
-    input()
+    # input()
 
     # Initialize state
     inputs = {

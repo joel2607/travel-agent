@@ -21,7 +21,7 @@ class MCPClient:
         }
 
         print(f"""
-payload: {json.dumps(payload)}
+            payload: {json.dumps(payload)}
               """)
         
         try:
@@ -31,9 +31,9 @@ payload: {json.dumps(payload)}
                 headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
                 timeout=30
             )
+            print(f"Response: {response.text}")
             response.raise_for_status()
             result = response.json()
-            print(f"Response: {result}")
             if "error" in result:
                 raise Exception(f"MCP Error: {result['error']}")
             
