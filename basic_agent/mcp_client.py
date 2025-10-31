@@ -20,9 +20,9 @@ class MCPClient:
             }
         }
 
-        print(f"""
-            payload: {json.dumps(payload)}
-              """)
+        # print(f"""
+        #     payload: {json.dumps(payload)}
+        #       """)
 
         try:
             response = requests.post(
@@ -31,7 +31,7 @@ class MCPClient:
                 headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
                 timeout=30
             )
-            print(f"Response: {response.text}")
+            # print(f"Response: {response.text}")
             response.raise_for_status()
 
             # --- START OF THE CRITICAL FIX ---
