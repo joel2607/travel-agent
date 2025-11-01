@@ -60,6 +60,26 @@ class GraphState(TypedDict):
     search_results: List[PlaceResult]
     travel_plan: TravelPlan
 
+# ---------------------
+# Memory States
+# --------------------
+
+class CoreMemory(BaseModel):
+    """Persistent user facts that rarely change"""
+    user_id: str
+    budget_range: str
+    travel_style: str  # adventurous, relaxed, cultural
+    dietary_restrictions: List[str]
+    accessibility_needs: List[str]
+    preferred_accommodation_type: str
+
+class RecallMemory(BaseModel):
+    """Semantic memory of past interactions"""
+    memory_id: str
+    content: str
+    category: str
+    timestamp: str
+    embedding: List[float] = None
 
 # ---------------------
 # NODE FUNCTIONS
@@ -264,6 +284,62 @@ def create_travel_plan_node(state: GraphState):
     
     return state
 
+def create_memory_management_tools():
+    """Create tools for the agent to manage its own memory"""
+    
+    def update_core_memory(user_id: str, field: str, value: str):
+        """Update persistent user information"""
+        namespace = (user_id, "core_memory")
+        current = store.get(namespace, "core")
+        if current:
+            current.value[field] = value
+            store.put(namespace, "core", current.value)
+        return f"Updated {field} to {value}"
+    
+    def search_past_trips(user_id: str, query: str, limit: int = 5):
+        """Search through past trip memories"""
+        namespace = (user_id, "past_trips")
+        results = store.search(namespace, query=query, limit=limit)
+        return [r.value for r in results]
+    
+    def add_trip_memory(user_id: str, trip_data: Dict):
+        """Store a completed trip for future reference"""
+        namespace = (user_id, "past_trips")
+        memory_id = f"trip_{datetime.now().timestamp()}"
+        store.put(namespace, memory_id, trip_data)
+        return "Trip memory saved"
+    
+    return [update_core_memory, search_past_trips, add_trip_memory]
+
+# Add memory retrieval node
+def memory_retrieval_node(state: GraphState, store):
+    """Retrieve relevant memories before planning"""
+    user_id = state.get('user_id', 'default_user')
+    preferences = state['user_preferences']
+    
+    # Get core memories
+    core_namespace = (user_id, "core_memory")
+    core_memory = store.get(core_namespace, "core")
+    
+    # Search past trips for similar destinations or interests
+    trip_namespace = (user_id, "past_trips")
+    similar_trips = store.search(
+        trip_namespace,
+        query=f"{preferences.destination} {' '.join(preferences.interests)}",
+        limit=3
+    )
+    
+    # Enrich state with memories
+    state['core_memory'] = core_memory.value if core_memory else {}
+    state['similar_past_trips'] = [t.value for t in similar_trips]
+    
+    state['messages'].append({
+        "role": "assistant",
+        "content": f"I remember you've been to {len(similar_trips)} similar destinations before. Let me use that to personalize your plan!"
+    })
+    
+    return state
+
 def should_continue(state: GraphState) -> str:
     """Determine the next step in the flow."""
     user_messages = [m for m in state['messages'] if m.get('role') == 'user']
@@ -280,6 +356,7 @@ def should_continue(state: GraphState) -> str:
         return "plan"
     else:
         return "end"
+
 
 # ---------------------
 # BUILD GRAPH
