@@ -15,3 +15,7 @@ class SearchQuery(BaseModel):
     category: str = Field(..., description="A high-level category for the search, e.g., 'Restaurants', 'Attractions'.")
     query: str = Field(..., description="The specific, optimized search string for Google Maps.")
     priority: int = Field(..., description="A priority score from 1-5, where 5 is most important, based on user interests.")
+
+class SearchQueries(BaseModel):
+    """A wrapper containing a list of search queries."""
+    queries: List[SearchQuery] = Field(..., description="List of 6-8 strategic search queries")
