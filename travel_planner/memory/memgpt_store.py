@@ -4,7 +4,7 @@ from chromadb.config import Settings as ChromaSettings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from config.settings import settings
-from models.memory import ConversationMessage, TripMemory
+from models.memory import ConversationMessage
 
 
 class MemoryStore:
