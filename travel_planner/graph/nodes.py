@@ -223,14 +223,14 @@ def memory_aware_preferences_node(state: GraphState) -> GraphState:
     user_messages = [m for m in state['messages'] if m.get('role') == 'user']
     if not user_messages:
         greeting = """Hi! I'm your travel planning assistant with memory. 
-I'll remember your preferences and past trips to provide personalized recommendations.
+            I'll remember your preferences and past trips to provide personalized recommendations.
 
-Tell me about your travel plans:
-- Where would you like to go?
-- How long is your trip?
-- What's your budget?
-- Who are you traveling with?
-- What interests you?"""
+            Tell me about your travel plans:
+            - Where would you like to go?
+            - How long is your trip?
+            - What's your budget?
+            - Who are you traveling with?
+            - What interests you?"""
         
         state['messages'].append({"role": "assistant", "content": greeting})
         return state
