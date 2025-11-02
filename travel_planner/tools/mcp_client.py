@@ -103,3 +103,21 @@ class MCPClient:
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
             print(f"Error parsing geocoding results for '{address}': {e}")
             return {}
+    
+    def calculate_distance_matrix(self, origins: List[str], destinations: List[str], mode: str = "driving") -> Dict:
+        """Calculate distances between multiple origins and destinations."""
+        args = {
+            "origins": origins,
+            "destinations": destinations,
+            "mode": mode
+        }
+        return self.call_tool("maps_distance_matrix", args)
+
+    def get_directions(self, origin: str, destination: str, mode: str = "driving") -> Dict:
+        """Get detailed directions between two points."""
+        args = {
+            "origin": origin,
+            "destination": destination,
+            "mode": mode
+        }
+        return self.call_tool("maps_directions", args)
