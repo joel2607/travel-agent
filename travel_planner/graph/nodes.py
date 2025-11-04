@@ -6,6 +6,7 @@ from graph.state import GraphState
 from models.preferences import PreferencesModel, SearchQueries
 from memory.memgpt_system import MemGPTSystem
 from models.places import PlaceResult, TravelPlan
+from utils.helpers import _parse_duration_to_days, _cluster_places_by_distance, _basic_travel_plan, _generate_basic_narrative
 
 import os, datetime, json
 
@@ -340,7 +341,7 @@ def execute_searches_node(state: GraphState):
     return state
 
 
-def create_travel_plan_node(state: GraphState):
+def basic_travel_plan_node(state: GraphState):
     """Compile search results into a comprehensive travel plan."""
     results = state.get('search_results')
     preferences = state.get('user_preferences')
@@ -405,6 +406,169 @@ def create_travel_plan_node(state: GraphState):
     
     print(f"✅ Travel plan created with {len(results)} places")
     
+    return state
+
+def create_travel_plan_node(state: GraphState) -> GraphState:
+    """Compile search results into an optimized travel plan with directions and memory integration."""
+    results = state.get('search_results')
+    preferences = state.get('user_preferences')
+    memgpt_system = state.get('memgpt_system')
+    
+    if not results or len(results) == 0:
+        print("❌ No search results to create plan from")
+        return state
+        
+    if not preferences:
+        print("❌ No preferences available")
+        return state
+    
+    print("--- CREATING OPTIMIZED TRAVEL PLAN ---")
+    
+    # Initialize MCP client
+    mcp_client = MCPClient()
+    
+    # Retrieve long-term memory context if available
+    memory_context = ""
+    if memgpt_system:
+        try:
+            # Search memory for relevant past preferences (e.g., trip styles, avoided items)
+            memory_query = f"{preferences.destination} {', '.join(preferences.interests)} preferences"
+            past_insights = memgpt_system.memory_store.search_archival(memory_query, page_size=2)
+            if past_insights:
+                memory_context = f"Past preferences: {json.dumps(past_insights, indent=2)}"
+                print("✅ Incorporated long-term memory insights")
+        except Exception as e:
+            print(f"⚠️ Could not retrieve memory: {e}")
+    
+    # Geocode all places for coordinates (if not already available)
+    places_with_coords = []
+    for place in results:
+        if not place.location or not place.location.get('lat') or not place.location.get('lng'):
+            try:
+                coords = mcp_client.geocode(place.formatted_address)
+                place.location = coords
+            except Exception as e:
+                print(f"⚠️ Could not geocode {place.name}: {e}")
+                continue
+        places_with_coords.append(place)
+    
+    if len(places_with_coords) < 2:
+        # Fallback to original logic if insufficient places
+        print("⚠️ Insufficient places for optimization, using basic plan")
+        return basic_travel_plan_node(state, places_with_coords, preferences)
+    
+    # Group by category and sort by rating/priority
+    places_by_category = {}
+    for place in places_with_coords:
+        cat = place.category
+        if cat not in places_by_category:
+            places_by_category[cat] = []
+        places_by_category[cat].append(place)
+    
+    for category in places_by_category:
+        places_by_category[category].sort(
+            key=lambda x: (x.priority * 2 + (x.rating or 0)), 
+            reverse=True
+        )
+        # Limit to top 3-5 per category to avoid overload
+        places_by_category[category] = places_by_category[category][:5]
+    
+    # Optimize selection: Select top places across categories, compute distances
+    selected_places = []
+    all_coords = [(p.location['lat'], p.location['lng']) for p in places_with_coords if p.location]
+    
+    if len(all_coords) > 1:
+        try:
+            # Use distance matrix to get pairwise distances (in meters)
+            origins = [f"{lat},{lng}" for lat, lng in all_coords[:10]]  # Limit to avoid API costs
+            destinations = origins.copy()
+            distance_result = mcp_client.calculate_distance_matrix(origins, destinations, mode="driving")
+            
+            # Parse distance matrix (assuming it returns a matrix of distances/durations)
+            if distance_result and "rows" in distance_result:
+                # Simple clustering: Select places within 10km total daily travel
+                daily_groups = _cluster_places_by_distance(places_with_coords, distance_result, max_daily_distance=10000)
+                selected_places = [place for group in daily_groups for place in group]
+            else:
+                selected_places = places_with_coords[:10]  # Fallback
+        except Exception as e:
+            print(f"⚠️ Distance optimization failed: {e}, using top-rated fallback")
+            # Select top 10 by combined score
+            selected_places = sorted(places_with_coords, key=lambda x: x.priority * 2 + (x.rating or 0), reverse=True)[:10]
+    else:
+        selected_places = places_with_coords
+    
+    # Generate daily itinerary with directions
+    num_days = _parse_duration_to_days(preferences.duration)  # e.g., "1 week" -> 7
+    daily_itineraries = []
+    places_per_day = max(1, len(selected_places) // num_days)
+    
+    for day in range(num_days):
+        day_places = selected_places[day * places_per_day:(day + 1) * places_per_day]
+        if len(day_places) > 1:
+            # Get directions from first to last place, assuming sequential visit
+            try:
+                directions = mcp_client.get_directions(
+                    day_places[0].formatted_address, 
+                    day_places[-1].formatted_address, 
+                    mode="driving" if preferences.companions != "solo" else "walking"
+                )
+                day_route = f"Total distance: {directions.get('distance', 'N/A')}, Duration: {directions.get('duration', 'N/A')}"
+                day_route += f"\nSteps: {directions.get('steps', [])}"  # Simplified; format as needed
+            except Exception as e:
+                day_route = "Directions unavailable; plan your route via Google Maps."
+        else:
+            day_route = "Single location - no travel needed."
+        
+        daily_itineraries.append({
+            "day": day + 1,
+            "places": day_places,
+            "route": day_route
+        })
+    
+    # Create TravelPlan with optimizations
+    optimized_plan = TravelPlan(
+        destination=preferences.destination,
+        total_places=len(selected_places),
+        places_by_category={cat: [p for p in selected_places if p.category == cat] for cat in places_by_category},
+        daily_itineraries=daily_itineraries,
+        optimizations={
+            "selection_criteria": "High rating + proximity (max 10km/day)",
+            "memory_integration": memory_context
+        },
+        recommendations=[]
+    )
+    
+    state['travel_plan'] = optimized_plan
+    
+    # Generate formatted response with LLM for narrative (incorporate memory)
+    llm = ChatGoogleGenerativeAI(
+        model=settings.LLM_MODEL,
+        temperature=0.5,
+        api_key=settings.GEMINI_API_KEY
+    )
+    
+    narrative_prompt = f"""Create a engaging daily travel itinerary for {preferences.destination}.
+Preferences: Duration {preferences.duration}, Budget {preferences.budget}, With {preferences.companions}, Interests: {', '.join(preferences.interests)}.
+Memory insights: {memory_context}.
+
+Daily structure:
+{daily_itineraries}
+
+Include tips based on past preferences and optimize for minimal travel."""
+    
+    try:
+        narrative = llm.invoke(narrative_prompt).content
+    except:
+        # Fallback narrative
+        narrative = _generate_basic_narrative(daily_itineraries, preferences, memory_context)
+    
+    state['messages'].append({
+        "role": "assistant",
+        "content": f"# Optimized Travel Plan for {preferences.destination}\n\n{narrative}\n\n**Optimizations:** Selected based on ratings, distances, and your past preferences from memory."
+    })
+    
+    print(f"✅ Optimized plan created with {len(selected_places)} places across {num_days} days")
     return state
 
 
