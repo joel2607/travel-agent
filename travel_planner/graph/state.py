@@ -16,6 +16,3 @@ class GraphState(TypedDict):
     user_id: str
     memgpt_system: Optional[MemGPTSystem]
     context_usage: Optional[int]
-    
-    # Loop prevention
-    processed_message_count: Optional[int]

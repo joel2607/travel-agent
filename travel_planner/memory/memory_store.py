@@ -61,6 +61,30 @@ class MemoryStore:
         self.core_memory_store[self.user_id] = core_memory
         with open(self.core_memory_file, "w") as f:
             json.dump(self.core_memory_store, f, indent=4)
+
+    def clear_all_memory(self):
+        """Deletes all memory associated with the user."""
+        # Clear core memory file
+        if os.path.exists(self.core_memory_file):
+            os.remove(self.core_memory_file)
+        self.core_memory_store = {}
+        
+        # Clear Chroma collections
+        try:
+            self.client.delete_collection(name=f"conversations_{self.user_id}")
+            self.client.delete_collection(name=f"archival_{self.user_id}")
+        except Exception as e:
+            print(f"Could not delete collections: {e}")
+        
+        # Recreate collections so the app can continue
+        self.conversation_collection = self.client.get_or_create_collection(
+            name=f"conversations_{self.user_id}",
+            metadata={"type": "recall_storage"}
+        )
+        self.archival_collection = self.client.get_or_create_collection(
+            name=f"archival_{self.user_id}",
+            metadata={"type": "archival_storage"}
+        )
     
     def save_conversation_message(self, message: ConversationMessage):
         """Save message to recall storage"""

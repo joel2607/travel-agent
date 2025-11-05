@@ -9,6 +9,7 @@ class PreferencesModel(BaseModel):
     interests: List[str] | None = Field(default=None, description="User's interests like history, shopping, adventure, etc.")
     pace: str | None = Field(default=None, description="Preferred pace: relaxed, moderate, fast-paced")
     must_see: List[str] | None = Field(default=None, description="Specific sights or activities user must see/do")
+    ready_to_plan: bool = Field(default=False, description="Flag to indicate when to start planning the trip.")
 
 class SearchQuery(BaseModel):
     """Represents a single, strategic query to be executed."""
