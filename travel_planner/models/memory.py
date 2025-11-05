@@ -6,7 +6,7 @@ class CoreMemory(BaseModel):
     """Persistent user facts - always in context"""
     user_id: str
     persona: str = "I am a helpful travel planning assistant."
-    user_profile: str = "No user information yet."
+    user_profile: str
     travel_style: Optional[str] = None
     budget_range: Optional[str] = None
     dietary_restrictions: List[str] = []

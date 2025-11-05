@@ -1,4 +1,6 @@
 from typing import List, Dict, Any, Optional
+import json
+import os
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -12,6 +14,7 @@ class MemoryStore:
     
     def __init__(self, user_id: str):
         self.user_id = user_id
+        self.core_memory_file = os.path.join(settings.CHROMA_PERSIST_DIR, "core_memory.json")
         
         # Initialize embeddings
         self.embeddings = GoogleGenerativeAIEmbeddings(
@@ -37,8 +40,18 @@ class MemoryStore:
         )
         
         # Core memory (simple dict storage - use DB in production)
-        self.core_memory_store = {}
+        self.core_memory_store = self._load_core_memory_from_file()
     
+    def _load_core_memory_from_file(self) -> Dict:
+        """Load core memory from JSON file"""
+        if os.path.exists(self.core_memory_file):
+            try:
+                with open(self.core_memory_file, "r") as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
     def get_core_memory(self) -> Optional[Dict]:
         """Retrieve core memory"""
         return self.core_memory_store.get(self.user_id)
@@ -46,6 +59,8 @@ class MemoryStore:
     def save_core_memory(self, core_memory: Dict):
         """Save core memory"""
         self.core_memory_store[self.user_id] = core_memory
+        with open(self.core_memory_file, "w") as f:
+            json.dump(self.core_memory_store, f, indent=4)
     
     def save_conversation_message(self, message: ConversationMessage):
         """Save message to recall storage"""
@@ -107,6 +122,17 @@ class MemoryStore:
             ids=[doc_id]
         )
     
+    def get_all_archival_memories(self) -> List[Dict]:
+        """Retrieve all documents from archival storage."""
+        results = self.archival_collection.get(include=["documents", "metadatas"])
+        
+        formatted_results = []
+        if results['documents']:
+            for doc, metadata in zip(results['documents'], results['metadatas']):
+                formatted_results.append({"content": doc, "metadata": metadata})
+        
+        return formatted_results
+        
     def search_archival(
         self,
         query: str,

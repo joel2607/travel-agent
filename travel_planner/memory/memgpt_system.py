@@ -45,7 +45,14 @@ class MemGPTSystem:
         core = self.memory_store.get_core_memory()
         if core:
             return CoreMemory(**core)
-        return CoreMemory(user_id=self.user_id)
+        
+        # Create a new core memory with a default user profile
+        new_core = CoreMemory(
+            user_id=self.user_id,
+            user_profile="I am a new user. Please ask me about my travel preferences."
+        )
+        self.memory_store.save_core_memory(new_core.dict())
+        return new_core
     
     def _define_memory_functions(self) -> List[Dict]:
         """Define all memory management functions"""

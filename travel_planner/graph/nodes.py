@@ -12,22 +12,16 @@ import os, datetime, json
 
 
 def memory_aware_preferences_node(state: GraphState) -> GraphState:
-    """Extract preferences using MemGPT memory system"""
+    """Extracts and validates travel preferences, interactively prompting the user if necessary."""
     
     # Get or create MemGPT system for this user
     if 'memgpt_system' not in state or state['memgpt_system'] is None:
         state['memgpt_system'] = MemGPTSystem(state.get('user_id', 'default_user'))
-    
     memgpt = state['memgpt_system']
-    
-    # Track which messages we've processed to avoid loops
-    if 'processed_message_count' not in state:
-        state['processed_message_count'] = 0
     
     # Get user messages
     user_messages = [m for m in state.get('messages', []) if m.get('role') == 'user']
     
-    # If first message, just greet
     if not user_messages:
         greeting = """Hi! I'm your travel planning assistant with memory. 
 I'll remember your preferences and past trips to provide personalized recommendations.
@@ -38,97 +32,29 @@ Tell me about your travel plans:
 - What's your budget?
 - Who are you traveling with?
 - What interests you?"""
-        
         state['messages'].append({"role": "assistant", "content": greeting})
-        state['processed_message_count'] = 0
         return state
-    
-    # Check if we've already processed all current user messages
-    if len(user_messages) <= state['processed_message_count']:
-        # No new messages to process, just return
-        print("⚠️ No new user messages to process, skipping...")
-        return state
-    
-    # Process only the latest unprocessed user message
-    latest_message = user_messages[-1]['content']
-    
-    # Mark this message as processed BEFORE processing to prevent re-entry
-    state['processed_message_count'] = len(user_messages)
-    
-    print(f"📝 Processing user message #{state['processed_message_count']}: {latest_message[:50]}...")
-    
-    # Process through MemGPT
-    result = memgpt.process_message(latest_message)
-    
-    # Add response to messages
-    state['messages'].append({
-        "role": "assistant",
-        "content": result['response']
-    })
-    
-    # Only try to extract preferences if:
-    # 1. We have at least 2 user messages (initial query + follow-up)
-    # 2. OR the assistant response indicates readiness to plan
-    # 3. AND we don't already have valid preferences
-    
-    should_extract = False
-    
-    # Check if we already have valid preferences
-    existing_prefs = state.get('user_preferences')
-    if existing_prefs and hasattr(existing_prefs, 'destination') and existing_prefs.destination:
-        # Already have valid preferences, skip extraction
-        print("✅ Already have valid preferences, skipping extraction")
-        return state
-    
-    # Check if assistant indicated readiness
-    last_assistant_msg = result['response'].lower()
-    readiness_signals = [
-        "let me start planning",
-        "let me create your plan",
-        "i'll search for places",
-        "let me search for",
-        "i understand you want to visit"
-    ]
-    
-    if any(signal in last_assistant_msg for signal in readiness_signals):
-        should_extract = True
-        print("🎯 Detected readiness signal, will extract preferences")
-    
-    # Or if we have multiple exchanges
-    if len(user_messages) >= 2:
-        should_extract = True
-        print(f"🎯 Have {len(user_messages)} user messages, will attempt extraction")
-    
-    if not should_extract:
-        print("⏸️ Not ready to extract preferences yet")
-        return state
-    
-    # Try to extract structured preferences from conversation
+
+    # Process latest user message through MemGPT, but only if it's new
+    latest_user_message = user_messages[-1]['content']
+    if state.get('last_processed_message') != latest_user_message:
+        print(f"📝 Processing user message: {latest_user_message[:50]}...")
+        # Don't send system-level memory updates to the user
+        if not latest_user_message.startswith("SYSTEM:"):
+            result = memgpt.process_message(latest_user_message)
+            state['messages'].append({"role": "assistant", "content": result['response']})
+        state['last_processed_message'] = latest_user_message
+
+    # Attempt to extract preferences from the conversation
     try:
-        llm = ChatGoogleGenerativeAI(
-            model=settings.LLM_MODEL,
-            temperature=0,
-            api_key=settings.GEMINI_API_KEY
-        )
+        llm = ChatGoogleGenerativeAI(model=settings.LLM_MODEL, temperature=0, api_key=settings.GEMINI_API_KEY)
         structured_llm = llm.with_structured_output(PreferencesModel)
         
-        # Include core memory in extraction
-        conversation_text = "\n".join([
-            f"{m.get('role', 'unknown')}: {m.get('content', '')}" 
-            for m in state['messages']
-        ])
+        conversation_text = "\n".join([f"{m.get('role', 'unknown')}: {m.get('content', '')}" for m in state['messages']])
         core_context = f"User Profile: {memgpt.working_context.user_profile}"
         
         extraction_prompt = f"""Extract travel preferences from this conversation. 
-If the user hasn't specified something, use reasonable defaults:
-- duration: "1 week" 
-- budget: "mid-range"
-- companions: "solo"
-- interests: ["sightseeing"]
-- pace: "moderate"
-
-Only extract preferences if the user has at least specified a destination.
-If no destination is mentioned, return None for the destination field.
+Do not guess or assume any values. If the user has not specified a value for a field, leave it as null.
 
 Context from memory:
 {core_context}
@@ -136,29 +62,77 @@ Context from memory:
 Conversation:
 {conversation_text}
 """
-        
-        preferences = structured_llm.invoke([
+        extracted_prefs = structured_llm.invoke([
             {"role": "system", "content": extraction_prompt},
             {"role": "user", "content": "Extract preferences from the above conversation"}
         ])
+
+        preferences = state.get('user_preferences', PreferencesModel())
+        if extracted_prefs:
+            update_data = extracted_prefs.dict(exclude_unset=True)
+            preferences = preferences.copy(update=update_data)
         
-        # Validate that we have a real destination
-        if preferences and preferences.destination and preferences.destination.strip():
-            # Additional validation - check it's not a placeholder
-            invalid_destinations = ["none", "unknown", "not specified", "n/a", ""]
-            if preferences.destination.lower().strip() not in invalid_destinations:
-                state['user_preferences'] = preferences
-                print(f"✅ Successfully extracted preferences: {preferences.destination}")
-            else:
-                print(f"⚠️ Invalid destination extracted: {preferences.destination}")
-        else:
-            print("⚠️ No valid destination found in conversation yet")
+        state['user_preferences'] = preferences
+
+        if not preferences.destination or not preferences.duration:
+            last_assistant_message = next((m['content'] for m in reversed(state['messages']) if m.get('role') == 'assistant'), "")
+            if "What is your destination" not in last_assistant_message:
+                state['messages'].append({"role": "assistant", "content": "I can help with that! What is your destination and for how long is the trip?"})
+            return state
+
+        # Check for missing optional preferences
+        missing_prefs_to_ask = []
+        if not preferences.budget: missing_prefs_to_ask.append("your budget (e.g., budget-friendly, mid-range, luxury)")
+        if not preferences.companions: missing_prefs_to_ask.append("who you're traveling with (e.g., solo, couple, family)")
+        if not preferences.interests: missing_prefs_to_ask.append("your interests (e.g., sightseeing, food, history)")
+
+        last_assistant_message = next((m['content'] for m in reversed(state['messages']) if m.get('role') == 'assistant'), "")
+        just_asked_for_optional = "Any other preferences" in last_assistant_message
+
+        # If user says "no" or "defaults" after we asked, apply defaults and proceed
+        proceed_keywords = ["default", "proceed", "no", "continue", "don't have any"]
+        if just_asked_for_optional and any(keyword in latest_user_message.lower() for keyword in proceed_keywords):
+            if not preferences.budget: preferences.budget = "mid-range"
+            if not preferences.companions: preferences.companions = "solo"
+            if not preferences.interests: preferences.interests = ["sightseeing"]
+            if not preferences.pace: preferences.pace = "moderate"
+            missing_prefs_to_ask = [] # Clear the list as we've applied defaults
+
+        if missing_prefs_to_ask:
+            prompt = f"Great, planning a trip to {preferences.destination} for {preferences.duration}. "
+            prompt += "Any other preferences I should know about? Specifically:\n\n"
+            prompt += "\n".join(f"- {p}" for p in missing_prefs_to_ask)
+            prompt += "\n\nIf not, I can proceed with some common defaults."
+            state['messages'].append({"role": "assistant", "content": prompt})
+            return state
+
+        # All preferences are now gathered or defaulted
+        state['user_preferences'] = preferences
+        print(f"✅ Preferences finalized: {preferences.destination}")
+
+        # Update Core Memory with general preferences (not trip-specific ones)
+        try:
+            interests_str = ', '.join(preferences.interests) if preferences.interests else 'not specified'
+            preference_summary = (
+                f"User's general travel preferences seem to be: "
+                f"Budget: {preferences.budget}, "
+                f"Typical Companions: {preferences.companions}, "
+                f"Interests: {interests_str}."
+            )
+            update_message = f"SYSTEM: Update the user profile based on this summary: {preference_summary}"
             
+            print("🧠 Updating core memory with general preferences...")
+            memgpt.process_message(update_message)
+            print("✅ Core memory updated.")
+            
+        except Exception as e:
+            print(f"⚠️ Failed to update core memory: {e}")
+
     except Exception as e:
         print(f"Could not extract preferences yet: {e}")
         import traceback
         traceback.print_exc()
-    
+
     return state
 
 
@@ -188,7 +162,8 @@ def memory_enhanced_planning_node(state: GraphState) -> GraphState:
     context_str = ""
     if memgpt:
         try:
-            past_trips_query = f"{preferences.destination} {' '.join(preferences.interests)}"
+            interests_query = ' '.join(preferences.interests) if preferences.interests else ''
+            past_trips_query = f"{preferences.destination} {interests_query}"
             past_trips = memgpt.memory_store.search_archival(past_trips_query, page_size=3)
             
             if past_trips:
@@ -203,7 +178,7 @@ def memory_enhanced_planning_node(state: GraphState) -> GraphState:
         api_key=settings.GEMINI_API_KEY
     )
     
-    structured_llm = llm.with_structured_output(SearchQueries)  # <-- Changed
+    structured_llm = llm.with_structured_output(SearchQueries)
 
     user_profile = memgpt.working_context.user_profile if memgpt else "No previous history"
     
@@ -213,7 +188,7 @@ Current trip preferences:
 - Duration: {preferences.duration}
 - Budget: {preferences.budget}
 - Companions: {preferences.companions}
-- Interests: {', '.join(preferences.interests)}
+- Interests: {', '.join(preferences.interests or [])}
 - Must-See: {', '.join(preferences.must_see) if preferences.must_see else 'None'}
 
 User context from memory:
@@ -235,12 +210,11 @@ Each query object should have:
 - priority: integer (1-5, where 5 is most important)"""
     
     try:
-        # This now returns SearchQueries object containing list of SearchQuery objects
         search_queries_wrapper = structured_llm.invoke(query_prompt)
-        search_queries = search_queries_wrapper.queries  # Extract the list
+        search_queries = search_queries_wrapper.queries
         
         if search_queries and len(search_queries) > 0:
-            state['search_queries'] = search_queries  # Store the list
+            state['search_queries'] = search_queries
             print(f"✅ Generated {len(search_queries)} search queries")
             
             state['messages'].append({
@@ -395,7 +369,7 @@ def basic_travel_plan_node(state: GraphState):
                 plan_text += f"   📍 {place.formatted_address}\n\n"
     
     plan_text += "\n💡 **Tips:**\n"
-    plan_text += f"- This plan is tailored for your {preferences.budget} budget and {', '.join(preferences.interests)} interests\n"
+    plan_text += f"- This plan is tailored for your {preferences.budget} budget and {', '.join(preferences.interests or [])} interests\n"
     plan_text += f"- All locations are in or near {preferences.destination}\n"
     plan_text += "- Consider checking opening hours and making reservations where needed\n"
     
@@ -431,8 +405,8 @@ def create_travel_plan_node(state: GraphState) -> GraphState:
     memory_context = ""
     if memgpt_system:
         try:
-            # Search memory for relevant past preferences (e.g., trip styles, avoided items)
-            memory_query = f"{preferences.destination} {', '.join(preferences.interests)} preferences"
+            interests_query = ' '.join(preferences.interests) if preferences.interests else ''
+            memory_query = f"{preferences.destination} {interests_query} preferences"
             past_insights = memgpt_system.memory_store.search_archival(memory_query, page_size=2)
             if past_insights:
                 memory_context = f"Past preferences: {json.dumps(past_insights, indent=2)}"
@@ -453,9 +427,8 @@ def create_travel_plan_node(state: GraphState) -> GraphState:
         places_with_coords.append(place)
     
     if len(places_with_coords) < 2:
-        # Fallback to original logic if insufficient places
         print("⚠️ Insufficient places for optimization, using basic plan")
-        return basic_travel_plan_node(state, places_with_coords, preferences)
+        return basic_travel_plan_node(state)
     
     # Group by category and sort by rating/priority
     places_by_category = {}
@@ -470,43 +443,36 @@ def create_travel_plan_node(state: GraphState) -> GraphState:
             key=lambda x: (x.priority * 2 + (x.rating or 0)), 
             reverse=True
         )
-        # Limit to top 3-5 per category to avoid overload
         places_by_category[category] = places_by_category[category][:5]
     
-    # Optimize selection: Select top places across categories, compute distances
     selected_places = []
     all_coords = [(p.location['lat'], p.location['lng']) for p in places_with_coords if p.location]
     
     if len(all_coords) > 1:
         try:
-            # Use distance matrix to get pairwise distances (in meters)
-            origins = [f"{lat},{lng}" for lat, lng in all_coords[:10]]  # Limit to avoid API costs
+            origins = [f"{lat},{lng}" for lat, lng in all_coords[:10]]
             destinations = origins.copy()
             distance_result = mcp_client.calculate_distance_matrix(origins, destinations, mode="driving")
             
-            # Parse distance matrix (assuming it returns a matrix of distances/durations)
             if distance_result and "rows" in distance_result:
-                # Simple clustering: Select places within 10km total daily travel
                 daily_groups = _cluster_places_by_distance(places_with_coords, distance_result, max_daily_distance=10000)
                 selected_places = [place for group in daily_groups for place in group]
             else:
-                selected_places = places_with_coords[:10]  # Fallback
+                selected_places = places_with_coords[:10]
         except Exception as e:
             print(f"⚠️ Distance optimization failed: {e}, using top-rated fallback")
-            # Select top 10 by combined score
             selected_places = sorted(places_with_coords, key=lambda x: x.priority * 2 + (x.rating or 0), reverse=True)[:10]
     else:
         selected_places = places_with_coords
     
-    # Generate daily itinerary with directions
-    num_days = _parse_duration_to_days(preferences.duration)  # e.g., "1 week" -> 7
+    num_days = _parse_duration_to_days(preferences.duration)
     daily_itineraries = []
     places_per_day = max(1, len(selected_places) // num_days)
     
     for day in range(num_days):
         day_places = selected_places[day * places_per_day:(day + 1) * places_per_day]
+        day_route = "Directions unavailable; plan your route via Google Maps."
         if len(day_places) > 1:
-            # Get directions from first to last place, assuming sequential visit
             try:
                 directions = mcp_client.get_directions(
                     day_places[0].formatted_address, 
@@ -514,11 +480,9 @@ def create_travel_plan_node(state: GraphState) -> GraphState:
                     mode="driving" if preferences.companions != "solo" else "walking"
                 )
                 day_route = f"Total distance: {directions.get('distance', 'N/A')}, Duration: {directions.get('duration', 'N/A')}"
-                day_route += f"\nSteps: {directions.get('steps', [])}"  # Simplified; format as needed
-            except Exception as e:
-                day_route = "Directions unavailable; plan your route via Google Maps."
-        else:
-            day_route = "Single location - no travel needed."
+                day_route += f"\nSteps: {directions.get('steps', [])}"
+            except Exception:
+                pass
         
         daily_itineraries.append({
             "day": day + 1,
@@ -526,7 +490,6 @@ def create_travel_plan_node(state: GraphState) -> GraphState:
             "route": day_route
         })
     
-    # Create TravelPlan with optimizations
     optimized_plan = TravelPlan(
         destination=preferences.destination,
         total_places=len(selected_places),
@@ -541,7 +504,6 @@ def create_travel_plan_node(state: GraphState) -> GraphState:
     
     state['travel_plan'] = optimized_plan
     
-    # Generate formatted response with LLM for narrative (incorporate memory)
     llm = ChatGoogleGenerativeAI(
         model=settings.LLM_MODEL,
         temperature=0.5,
@@ -549,18 +511,17 @@ def create_travel_plan_node(state: GraphState) -> GraphState:
     )
     
     narrative_prompt = f"""Create a engaging daily travel itinerary for {preferences.destination}.
-Preferences: Duration {preferences.duration}, Budget {preferences.budget}, With {preferences.companions}, Interests: {', '.join(preferences.interests)}.
+Preferences: Duration {preferences.duration}, Budget {preferences.budget}, With {preferences.companions}, Interests: {', '.join(preferences.interests or [])}.
 Memory insights: {memory_context}.
 
 Daily structure:
-{daily_itineraries}
+{json.dumps([d for d in daily_itineraries], default=lambda o: o.__dict__, indent=2)}
 
 Include tips based on past preferences and optimize for minimal travel."""
     
     try:
         narrative = llm.invoke(narrative_prompt).content
     except:
-        # Fallback narrative
         narrative = _generate_basic_narrative(daily_itineraries, preferences, memory_context)
     
     state['messages'].append({

@@ -2,13 +2,13 @@ from pydantic import BaseModel, Field
 from typing import List
 
 class PreferencesModel(BaseModel):
-    destination: str = Field(..., description="City or place user wants to visit")
-    duration: str = Field(..., description="Length of the trip")
-    budget: str = Field(..., description="Budget level: budget-friendly, mid-range, luxury")
-    companions: str = Field(..., description="Travel companions: solo, friends, family, couple")
-    interests: List[str] = Field(..., description="User's interests like history, shopping, adventure, etc.")
-    pace: str = Field(None, description="Preferred pace: relaxed, moderate, fast-paced")
-    must_see: List[str] = Field(None, description="Specific sights or activities user must see/do")
+    destination: str | None = Field(default=None, description="City or place user wants to visit")
+    duration: str | None = Field(default=None, description="Length of the trip")
+    budget: str | None = Field(default=None, description="Budget level: budget-friendly, mid-range, luxury")
+    companions: str | None = Field(default=None, description="Travel companions: solo, friends, family, couple")
+    interests: List[str] | None = Field(default=None, description="User's interests like history, shopping, adventure, etc.")
+    pace: str | None = Field(default=None, description="Preferred pace: relaxed, moderate, fast-paced")
+    must_see: List[str] | None = Field(default=None, description="Specific sights or activities user must see/do")
 
 class SearchQuery(BaseModel):
     """Represents a single, strategic query to be executed."""
